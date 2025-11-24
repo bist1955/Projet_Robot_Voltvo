@@ -70,22 +70,28 @@ int menuActuel = 0; // 0: principal, 1: manuel, 2: nourrir
 int delai_affichage = 20;
 bool last_bp_r = false;
 bool last_bp_v = false;
-LiquidCrystal lcd(10, 11, 44, 45, 46, 48, 40, 41, 42, 43);
+LiquidCrystal lcd(38, 39, 44, 45, 46, 48, 40, 41, 42, 43);
+uint16_t rouge, vert, bleu, clear;
 
 int lastDirection = 0; // Derniere direction sur le suiveur de ligne (-1 = ligne à gauche, 1 = ligne à droite, 0 = centré / inconnu)
 
-// Côtés physiques sur le robot
+// Côtés physiques sur le robot par rapport à la ligne présentement
 const int COTE_EXT = 0;
 const int COTE_INT = 1;
 
-// Position FIXE des réservoirs sur le robot (dans la vraie vie)
-int reservoirChien = COTE_INT; // chien fixé à linterieur du cercle
-int reservoirChat  = COTE_EXT; // chat fixé à lexterieur du cercle
+// Position FIXE des réservoirs sur le robot (dans la vraie vie) si on regarde dans la direction des capteurs du suiveur de ligne
+int reservoirChien = COTE_INT; // chien fixé à linterieur du cercle (Droite)
+int reservoirChat  = COTE_EXT; // chat fixé à lexterieur du cercle (Gauche)
 
 // Compteurs de corrections du suiveur
 int nbCorrectionGauche = 0;  // corrections où le robot tourne vers la gauche
 int nbCorrectionDroite = 0;  // corrections où le robot tourne vers la droite
 
+//Capteur IR
+int capteur_g = 8;
+int capteur_d = 9;
+
+int nbTourServo = 4;
 
 /* ****************************************************************************
 Vos propres fonctions sont creees ici
@@ -174,6 +180,32 @@ int pulsesMax = 1900;
   }
  arret(80);
 }
+
+void tournerGauche(){
+int pulsesMax = 1900;
+  //Mettre à l'état tourne à droite
+  etat=4;
+  resetPID();
+  vitesse0=vitesse;
+  vitesse1=-vitesse;
+  long now = millis();
+  while (pulsesMax>ENCODER_Read(0)&&pulsesMax>-ENCODER_Read(1))
+  {
+    if(millis()-now>deltaT)
+    {
+      now = millis();
+      MOTOR_SetSpeed(RIGHT,(vitesse1 + calculPID(1)));
+      MOTOR_SetSpeed(LEFT, (vitesse0 + calculPID(0)));
+    }
+    if(checkJaune())
+    {
+      resetMenu();
+      return;
+    }
+ 
+  }
+ arret(80);
+}
 void tournerDroiteDance(int angle, float facteurVitesse){
 int pulsesMax = angle*21.1;
   //Mettre à l'état tourne à gauche
@@ -207,7 +239,7 @@ void tournerJusquaLigne(int sens){
     vitesse0=vitesse;
     vitesse1=-vitesse;
     long now = millis();
-    while(analogRead(pinU2)<850)
+    while(analogRead(pinU2)<700)
     {
       if(millis()-now>10)
       {
@@ -230,7 +262,7 @@ void tournerJusquaLigne(int sens){
     vitesse0=-vitesse;
     vitesse1=vitesse;
     long now = millis();
-    while(analogRead(pinU2)<600)
+    while(analogRead(pinU2)<700)
     {
       if(millis()-now>10)
       {
@@ -291,10 +323,16 @@ void beep(int count){
 //Avance et arrete a une ligne au sol
 void avancerjusqualigne(){
  
-    while(analogRead(pinU2)<850){
+    while(analogRead(pinU2)<700 && analogRead(pinU1)<700 && analogRead(pinU3)<700){
       avancer(30);
+      tcs.getRawData(&rouge, &vert, &bleu, &clear);
       if(checkJaune())
       {
+        resetMenu();
+        return;
+      }if((rouge > 125 && vert < 125 && bleu < 125) || (rouge > 100 && vert > 150 && bleu < 160))
+      { 
+        tournerDroite(); 
         resetMenu();
         return;
       }
@@ -303,9 +341,9 @@ void avancerjusqualigne(){
  }
  //Fonction qui avance jusqua une ligne ou pendant un certain laps de temps
  //Retourne vrai si le temps s'est écoulé
- bool avancerOuTrouverLigne(int temps){
-  vitesse0 = 0.2f;
-  vitesse1 = 0.2f;
+ bool avancerOuTrouverLigne(int temps,  float facteurVitesse = 0.2f){
+  vitesse0 = facteurVitesse;
+  vitesse1 = facteurVitesse;
   long now = millis();
     while(analogRead(pinU2)<700&&millis()-now<temps)
     {
@@ -317,22 +355,31 @@ void avancerjusqualigne(){
         resetMenu();
         return false;
       }
+      tcs.getRawData(&rouge, &vert, &bleu, &clear);
+
+      bool isChien = (rouge > 125 && vert < 125 && bleu < 125);
+      bool isChat  = (rouge > 100 && vert > 150 && bleu < 160);
+
+      if (isChien || isChat) {
+        return true;  
+      }
     }
-    Serial.println(analogRead(pinU2));
+    //Serial.println(analogRead(pinU2));
     return(analogRead(pinU2)<700);
  }
  // Retrouver la ligne par balayage gauche/droite, utile après une étape
  
  //Fonction suiveur de ligne
 void SuiveurDeLigne() {
+  
   if (checkJaune()) {
     resetMenu();
     return;
   }
 
   // Seuil et vitesse de base 
-  const int SEUIL = 750;
-  float vitesseSuiveur = 0.15f;
+  const int SEUIL = 700;
+  float vitesseSuiveur = 0.2f;
 
   int U1 = analogRead(pinU1); // gauche
   int U2 = analogRead(pinU2); // centre
@@ -385,22 +432,43 @@ void SuiveurDeLigne() {
     MOTOR_SetSpeed(RIGHT, vitesse1);
     MOTOR_SetSpeed(LEFT,  vitesse0);
   }
-
+  else if (U3 > SEUIL && U2 > SEUIL && U1 > SEUIL) { 
+    vitesse0 = vitesseSuiveur;        
+    vitesse1 = 0.0f;    
+    //lastDirection = 1;
+    //nbCorrectionDroite++; 
+    MOTOR_SetSpeed(RIGHT, vitesse1);
+    MOTOR_SetSpeed(LEFT,  vitesse0);
+  }
   // --- Cas : plus rien (les 3 capteurs dans le vide) ---
   else if (U1 < SEUIL && U2 < SEUIL && U3 < SEUIL) {
-    // Là on utilise la dernière direction connue
-    if (lastDirection == -1) {
+    tcs.getRawData(&rouge, &vert, &bleu, &clear);
+
+    bool isChien = (rouge > 125 && vert < 125 && bleu < 125);
+    bool isChat  = (rouge > 100 && vert > 150 && bleu < 160);
+
+    if(isChien || isChat){
+
+      vitesse0 = vitesseSuiveur;
+      vitesse1 = vitesseSuiveur;
+
+    }
+    else{
+      // Là on utilise la dernière direction connue
+      if (lastDirection == -1) {
       // La ligne était à gauche → on tourne vers la gauche
       vitesse0 = 0;               
       vitesse1 = vitesseSuiveur;  
-    } else if (lastDirection == 1) {
+      } else if (lastDirection == 1) {
       // La ligne était à droite → on tourne vers la droite
       vitesse0 = vitesseSuiveur;  
       vitesse1 = 0;               
-    } else {
+      } else {
       vitesse0 = vitesseSuiveur;
       vitesse1 = vitesseSuiveur;
+      }
     }
+
     MOTOR_SetSpeed(RIGHT, vitesse1);
     MOTOR_SetSpeed(LEFT,  vitesse0);
   }
@@ -539,16 +607,11 @@ void resetMenu()
  
 void modeManuel(int mode)
 {
-
-  SERVO_Enable(0);
-  SERVO_Enable(1); 
-
   bool pasEncoreNourri = true;
  
-  uint16_t rouge, vert, bleu, clear;
   avancerjusqualigne();
-  //avancer(300);
-  tournerJusquaLigne(1);
+  //avancer(200);
+  //tournerJusquaLigne(1);
   
   while(pasEncoreNourri){
     if(checkJaune())
@@ -559,8 +622,8 @@ void modeManuel(int mode)
     tcs.getRawData(&rouge, &vert, &bleu, &clear);
     if(rouge>125&&vert<125&&bleu<125&&mode==CHIEN)
     {
-      avancer(250);
-      arret(100);
+      avancer(400);
+      arret(200);
        OrientationReservoirs();
       if(reservoirChien==COTE_INT){
         tournerDroite();
@@ -568,8 +631,10 @@ void modeManuel(int mode)
       }
       int count = 0;
       long now = millis();
-      while(count<10){
-        if(millis()-now>2000){
+      SERVO_Enable(1);
+      delay(1500); 
+      while(count<nbTourServo){
+        if(millis()-now>1500){
           now = millis();
           SERVO_SetAngle(1, 180*(count%2));  
           count++;
@@ -580,12 +645,14 @@ void modeManuel(int mode)
           return;
         }
       }
+      delay(3000);
+      tournerGaucheDance(90, 1.5f);
       pasEncoreNourri=false;
     }
-    else if(rouge>100&&vert>150&&bleu<150&&clear>300&&mode==CHAT)
+    else if(rouge>100&&vert>150&&bleu<160&&mode==CHAT)
     {
-      avancer(250);
-      arret(100);
+      avancer(400);
+      arret(200);
       OrientationReservoirs();
       if(reservoirChat==COTE_INT){
         tournerDroite();
@@ -594,10 +661,12 @@ void modeManuel(int mode)
 
       int count = 0;
       long now = millis();
-      while(count<10){
-        if(millis()-now>2000){
+      SERVO_Enable(0);
+      delay(1500);
+      while(count<nbTourServo){
+        if(millis()-now>1500){
           now = millis();
-          SERVO_SetAngle(1, 180*(count%2)); 
+          SERVO_SetAngle(0, 180*(count%2)); 
           count++;
         }
         if(checkJaune())
@@ -606,10 +675,16 @@ void modeManuel(int mode)
           return;
         }
       }
+      delay(3000);
+      tournerDroite();
       pasEncoreNourri=false;
     }
     SuiveurDeLigne();
   }
+  avancer(1500);
+  arret(3000);
+
+  resetAll();
   resetMenu();
 }
  
@@ -642,7 +717,7 @@ void deplacement()
  
 void jouer()
 {
-    if(avancerOuTrouverLigne(2000))
+    if(avancerOuTrouverLigne(2000, 0.3f))
     {
       if(checkJaune())
       {
@@ -651,9 +726,9 @@ void jouer()
       }
       int angle = rand();
       if(angle%2==0)
-      tournerDroiteDance(angle%90+90,1.3);
+      tournerDroiteDance(angle%90+90,1.5);
       else
-      tournerGaucheDance((angle%90+90),1.3);
+      tournerGaucheDance((angle%90+90),1.5);
     }else
     {
       if(checkJaune())
@@ -666,6 +741,130 @@ void jouer()
       avancer(300);
     }
 }
+
+bool cibleChien = false;
+bool cibleChat  = false;
+
+void modeAuto() {
+
+  const float VITESSE_AVANT  = 0.15f;
+  const float VITESSE_TOURNE = 0.0f;
+  const uint16_t SEUIL_MUR   = 400;
+
+  while (true) {
+    bool cap_g = (digitalRead(capteur_g) == LOW);
+    bool cap_d = (digitalRead(capteur_d) == LOW);
+
+    uint16_t cap_distance = ROBUS_ReadIR(0);
+
+    bool murProche = (cap_distance > SEUIL_MUR);
+
+    if (checkJaune()) {
+      resetMenu();
+      resetAll();
+      return;
+    }
+
+    if(murProche){
+      MOTOR_SetSpeed(LEFT,  0.0f);
+      MOTOR_SetSpeed(RIGHT, 0.0f);
+
+      delay(200);
+
+      bool isChien = false;
+      bool isChat  = false;
+
+      while(!isChien && !isChat){
+        if (checkJaune()) {
+        resetMenu();
+        resetAll();
+        return;
+        }
+        tcs.getRawData(&rouge, &vert, &bleu, &clear);
+
+        isChien = (rouge > 100 && vert < 125 && bleu < 125);
+        isChat  = (rouge > 100 && vert > 150 && bleu < 160);
+
+        delay(100);
+      }
+
+      if(isChien){
+      tournerGaucheDance(90, 1.5f);
+      int count = 0;
+      long now = millis();
+      SERVO_Enable(1);
+      delay(500);
+      while(count<nbTourServo){
+        if(millis()-now>1500){
+          now = millis();
+          SERVO_SetAngle(1, 180*(count%2)); 
+          count++;
+        }
+        if(checkJaune())
+        {
+          resetMenu();
+          return;
+        }
+      }
+
+      }else if(isChat){
+
+      tournerDroite();
+      int count = 0;
+      long now = millis();
+      SERVO_Enable(0);
+      delay(500);
+      while(count<nbTourServo){
+        if(millis()-now>1500){
+          now = millis();
+          SERVO_SetAngle(0, 180*(count%2)); 
+          count++;
+        }
+        if(checkJaune())
+        {
+          resetMenu();
+          return;
+        }
+      }
+      }else{
+      resetMenu();
+      resetAll();
+      return; 
+      }
+
+      delay(500);
+      if(isChien){
+        //tournerGauche();
+        tournerGaucheDance(90, 1.5f);
+      }else if (isChat){
+        tournerDroite();
+      }else{
+      resetMenu();
+      resetAll();
+      return; 
+      }
+
+    }else{
+        if (cap_g && cap_d) {
+        MOTOR_SetSpeed(LEFT,  VITESSE_AVANT);
+        MOTOR_SetSpeed(RIGHT, VITESSE_AVANT);
+      }
+      else if (cap_g && !cap_d) {
+        MOTOR_SetSpeed(LEFT,  VITESSE_TOURNE);
+        MOTOR_SetSpeed(RIGHT, VITESSE_AVANT);
+      }
+      else if (!cap_g && cap_d) {
+        MOTOR_SetSpeed(LEFT,  VITESSE_AVANT);
+        MOTOR_SetSpeed(RIGHT, VITESSE_TOURNE);
+      }
+      else {
+        deplacement();
+      }
+    }
+    delay(100);
+  }
+}
+
  
 bool checkJaune()
 {
@@ -759,6 +958,8 @@ void setup() {
   pinMode(bp_r, INPUT_PULLUP); //Rouge
   pinMode(bp_v, INPUT_PULLUP); //Vert
   pinMode(bp_j, INPUT_PULLUP); //Jaune
+  pinMode(capteur_g, INPUT); //IR gauche
+  pinMode(capteur_d, INPUT); //IR droite
  // attachInterrupt(digitalPinToInterrupt(2), resetAll, CHANGE);
  
   lcd.begin(16, 4);
@@ -766,18 +967,30 @@ void setup() {
   afficher_menu_principal();
  
 }
-<<<<<<< Updated upstream
- 
- 
-=======
   
->>>>>>> Stashed changes
 /* ****************************************************************************
 Fonctions de boucle infini (loop())
 **************************************************************************** */
 // -> Se fait appeler perpetuellement suite au "setup"
 
 void loop() {
+
+ /*
+Serial.println("Distance IR:");
+Serial.println(ROBUS_ReadIR(0));
+delay(1000);
+*/
+/*
+  Serial.println("CAPTEUR G:");
+  Serial.println( digitalRead(capteur_g));
+  //Serial.println( ROBUS_ReadIR(capteur_g));
+  Serial.println("CAPTEUR D:");
+  Serial.println( digitalRead(capteur_d));
+  //Serial.println( ROBUS_ReadIR(capteur_d));
+  Serial.println("--------------");
+  delay(1000);
+  */
+
   /*
   Serial.println("TROIS CAPTEURS:");
   Serial.println(analogRead(pinU1));
@@ -808,6 +1021,8 @@ void loop() {
 
   delay(300);
   */
+
+  
   SERVO_Disable(0);
   SERVO_Disable(1);
 
@@ -835,10 +1050,9 @@ void loop() {
 
     case 0: // Menu principal
       if (click_btn_v) {
-        menu_mode_auto();                  
-        while (digitalRead(bp_j) != LOW) {
-          deplacement();
-        }
+        menu_mode_auto();                
+        modeAuto();
+        
       } else if (click_btn_r) {             
         menuActuel = 1;
         sous_menu_manuel();
@@ -848,7 +1062,9 @@ void loop() {
     case 1: // Menu manuel
       if (click_btn_v) {
         menu_mode_jouer();
-        jouer();
+        while (digitalRead(bp_j) != LOW) {
+          jouer();
+        }
       } else if (click_btn_r) {
         menuActuel = 2;
         sous_menu_nourrir();
@@ -871,7 +1087,7 @@ void loop() {
   }
 
   delay(100); 
-  
+ 
 }
 
 
